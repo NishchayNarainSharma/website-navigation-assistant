@@ -3,7 +3,7 @@
 A Chrome extension that uses Gemini AI to help users navigate websites more effectively.
 
 <div align="center">
-  <img src="images/Screenshot 2025-02-19 141516.png alt="Side Panel Demo" width="800"/>
+  <img src="images/Screenshot 2025-02-19 141516.png"alt="Side Panel Demo" width="800"/>
 </div>
 
 ## ✨ Features
