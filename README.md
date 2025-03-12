@@ -27,6 +27,11 @@ A Chrome extension that uses Gemini AI to help users navigate websites more effe
   <p><em>Real-time LLM connection status indicator</em></p>
 </div>
 
+<div align="center">
+  <img src="images/Screenshot 2025-02-21 162307.png" alt="interactive theme" width="300"/>
+  <p><em>interactive theme for websites</em></p>
+</div>
+
 
 ## Installation
 
