@@ -1,14 +1,22 @@
 // Add this at the top of your background.js
 chrome.runtime.onInstalled.addListener(async () => {
-    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-    
-    // Check if API key exists in storage
-    const result = await chrome.storage.local.get(['gemini_api_key']);
-    if (!result.gemini_api_key) {
-        // Set a default API key or prompt user to enter one
-        await chrome.storage.local.set({
-            gemini_api_key: "YOUR_DEFAULT_API_KEY" // Replace with your actual API key
-        });
+    try {
+        // Initialize side panel
+        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+        
+        // Check if API key exists
+        const result = await chrome.storage.local.get(['gemini_api_key']);
+        if (!result.gemini_api_key) {
+            // Set a default or empty API key
+            await chrome.storage.local.set({
+                gemini_api_key: '' // Empty string or your default API key
+            });
+            
+            // Open options page for user to enter API key
+            chrome.runtime.openOptionsPage();
+        }
+    } catch (error) {
+        console.error('Storage initialization failed:', error);
     }
 });
 
@@ -18,38 +26,121 @@ const API_CONFIG = {
     model: "gemini-1.5-flash"
 };
 
-// Remove duplicate listener since we're using setPanelBehavior
-// chrome.action.onClicked.addListener((tab) => {
-//     chrome.sidePanel.open({ windowId: tab.windowId });
-// });
+// Named function for installation
+function handleInstalled() {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    initializeStorage();
+}
 
-chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
-    if (message.action === "capture_screenshot") {
-        try {
-            await chrome.tabs.captureVisibleTab(null, { format: "png" }, async (image) => {
-                if (!image) {
-                    throw new Error("Failed to capture screenshot");
-                }
-                await processQuery(message.query, image);
+// Named function for storage initialization
+async function initializeStorage() {
+    try {
+        const result = await chrome.storage.local.get(['gemini_api_key']);
+        if (!result.gemini_api_key) {
+            await chrome.storage.local.set({
+                gemini_api_key: '' // Empty string or your default API key
             });
-        } catch (error) {
-            handleError("Screenshot capture failed", error);
+            chrome.runtime.openOptionsPage();
         }
+    } catch (error) {
+        console.error('Storage initialization failed:', error);
+    }
+}
+
+// Named function for message handling
+function handleMessage(message, sender, sendResponse) {
+    if (message.action === "capture_screenshot") {
+        handleScreenshotCapture(message.query);
     }
     if (message.action === "check_llm_status") {
         checkApiConnection().then(sendResponse);
         return true;
     }
     return true;
-});
+}
 
-async function processQuery(query, image) {
+// Named function for screenshot capture
+async function handleScreenshotCapture(query) {
     try {
-        if (!query || !image) {
-            throw new Error("Missing query or image data");
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tabs || tabs.length === 0) {
+            throw new Error("No active tab found");
         }
 
-        const base64Image = image.replace(/^data:image\/png;base64,/, '');
+        const tab = tabs[0];
+        await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            function: () => true
+        });
+
+        const screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, {
+            format: 'png'
+        });
+        
+        if (!screenshot) {
+            throw new Error("Screenshot capture failed");
+        }
+
+        await processQuery(query, screenshot);
+    } catch (error) {
+        console.error('Screenshot error:', error);
+        chrome.runtime.sendMessage({
+            action: "chat_response",
+            response: "Error: Failed to capture screenshot. " + error.message
+        });
+    }
+}
+
+// Add event listeners using named functions
+chrome.runtime.onInstalled.addListener(handleInstalled);
+chrome.runtime.onMessage.addListener(handleMessage);
+
+// Add action click listener to properly invoke the extension
+chrome.action.onClicked.addListener(async (tab) => {
+    try {
+        // This will invoke the extension and enable activeTab
+        await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            function: () => {
+                // This ensures the extension is properly invoked
+                console.log('Extension activated');
+            }
+        });
+        
+        // Capture screenshot after activation
+        const screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, {
+            format: 'png'
+        });
+        
+        if (screenshot) {
+            console.log('Screenshot captured successfully');
+        }
+        
+        // Open the side panel after activation
+        chrome.sidePanel.open({ windowId: tab.windowId });
+    } catch (error) {
+        console.error('Activation or screenshot failed:', error);
+    }
+});
+
+// Add helper function for API key retrieval
+async function getApiKey() {
+    try {
+        const result = await chrome.storage.local.get(['gemini_api_key']);
+        if (!result.gemini_api_key) {
+            throw new Error('API key not found. Please set it in the extension options.');
+        }
+        return result.gemini_api_key;
+    } catch (error) {
+        console.error('Failed to get API key:', error);
+        throw error;
+    }
+}
+
+// Update your processQuery function to use the new helper
+async function processQuery(query, screenshot) {
+    try {
+        const apiKey = await getApiKey();
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         
         if (!tab) {
@@ -57,19 +148,60 @@ async function processQuery(query, image) {
         }
 
         const pageData = await getPageData(tab);
-        await sendApiRequest(query, base64Image, pageData);
+        
+        console.log('Sending API request with the following data:', {
+            query,
+            screenshot: screenshot.substring(0, 30) + '...', // Log only the first 30 characters
+            pageData
+        });
+
+        const response = await fetch(`${API_CONFIG.baseUrl}?key=${apiKey}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                contents: [{
+                    parts: [
+                        { text: query },
+                        { inlineData: { mimeType: "image/png", data: screenshot.split(',')[1] } },
+                        { text: `Page Title: ${pageData.title}\nURL: ${pageData.url}\nContent: ${pageData.text}` }
+                    ]
+                }]
+            })
+        });
+
+        console.log('API response status:', response.status);
+
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log('API response data:', data);
+
+        chrome.runtime.sendMessage({
+            action: "chat_response",
+            response: data.candidates[0].content.parts[0].text
+        });
+
     } catch (error) {
-        handleError("Query processing failed", error);
+        console.error('Process query error:', error);
+        chrome.runtime.sendMessage({
+            action: "chat_response",
+            response: "Error: " + error.message
+        });
     }
 }
 
 async function getPageData(tab) {
     try {
-        const pageData = await Promise.race([
-            chrome.tabs.sendMessage(tab.id, { action: "extract_page_data" }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("Content script timeout")), 5000))
-        ]);
-        return pageData;
+        const response = await chrome.tabs.sendMessage(tab.id, { action: "extract_page_data" });
+        return response || {
+            title: tab.title || "Unknown",
+            url: tab.url || "Unknown",
+            text: "Page content unavailable"
+        };
     } catch (error) {
         console.warn("Failed to get page data:", error);
         return {
@@ -78,65 +210,6 @@ async function getPageData(tab) {
             text: "Page content unavailable"
         };
     }
-}
-
-async function sendApiRequest(query, base64Image, pageData) {
-    // Get API key from storage
-    const result = await chrome.storage.local.get(['gemini_api_key']);
-    const apiKey = result.gemini_api_key;
-    
-    if (!apiKey) {
-        throw new Error("API key not found");
-    }
-
-    const response = await fetch(`${API_CONFIG.baseUrl}?key=${apiKey}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            contents: [{
-                parts: [
-                    {
-                        text: `Context: ${pageData.title}\nURL: ${pageData.url}\nPage Content: ${pageData.text}\n\nUser Question: ${query}`
-                    },
-                    {
-                        inline_data: {
-                            mime_type: "image/png",
-                            data: base64Image
-                        }
-                    }
-                ]
-            }],
-            generationConfig: {
-                temperature: 0.7,
-                maxOutputTokens: 1000
-            }
-        })
-    });
-
-    if (!response.ok) {
-        throw new Error(`API request failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    handleResponse(data);
-}
-
-function handleResponse(data) {
-    if (!data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-        throw new Error("Invalid API response format");
-    }
-    chrome.runtime.sendMessage({ 
-        action: "chat_response", 
-        response: data.candidates[0].content.parts[0].text 
-    });
-}
-
-function handleError(context, error) {
-    console.error(`${context}:`, error);
-    chrome.runtime.sendMessage({ 
-        action: "chat_response", 
-        response: `Error: ${context}. ${error.message}` 
-    });
 }
 
 // Add this function to check API connectivity
@@ -168,3 +241,4 @@ async function checkApiConnection() {
         };
     }
 }
+
